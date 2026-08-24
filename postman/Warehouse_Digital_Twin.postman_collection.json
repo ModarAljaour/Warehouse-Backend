@@ -1,0 +1,131 @@
+{
+  "info": {
+    "_postman_id": "05a04b12-ccfb-4ced-9b79-4a1e1100a5c1",
+    "name": "Warehouse Digital Twin API v1.1",
+    "description": "REST contract for the Unity/FastAPI/Flutter warehouse digital twin. Import one of the supplied environments before running requests. WebSocket testing instructions are in the Realtime folder description.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('Response time is below 5 seconds', function () {",
+          "  pm.expect(pm.response.responseTime).to.be.below(5000);",
+          "});",
+          "pm.test('Response uses JSON', function () {",
+          "  pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json');",
+          "});"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {"key": "base_url", "value": "http://127.0.0.1:8000", "type": "string"},
+    {"key": "machine_id", "value": "arm_1", "type": "string"},
+    {"key": "robot_id", "value": "agv_01", "type": "string"},
+    {"key": "forklift_id", "value": "forklift_01", "type": "string"},
+    {"key": "device_id", "value": "arm_1", "type": "string"}
+  ],
+  "item": [
+    {
+      "name": "System",
+      "item": [
+        {
+          "name": "Service metadata",
+          "request": {"method": "GET", "header": [], "url": "{{base_url}}/"}
+        },
+        {
+          "name": "Health check",
+          "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/health"},
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('Health endpoint responds', () => pm.response.to.have.status(200));", "const body = pm.response.json();", "pm.test('MQTT block exists', () => pm.expect(body).to.have.property('mqtt'));", "pm.test('InfluxDB block exists', () => pm.expect(body).to.have.property('influxdb')); "]}}]
+        },
+        {
+          "name": "OpenAPI document",
+          "request": {"method": "GET", "header": [], "url": "{{base_url}}/openapi.json"}
+        }
+      ]
+    },
+    {
+      "name": "Authentication (Prototype)",
+      "description": "The returned demo token is not currently enforced by other endpoints.",
+      "item": [
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {"mode": "raw", "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"your_password\"\n}", "options": {"raw": {"language": "json"}}},
+            "url": "{{base_url}}/api/auth/login"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard",
+      "item": [
+        {"name": "Full dashboard snapshot", "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/dashboard"}},
+        {"name": "Current sensor readings", "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/sensors"}},
+        {"name": "Warehouse KPIs", "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/stats"}},
+        {"name": "Recent alerts", "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/alerts"}}
+      ]
+    },
+    {
+      "name": "Machines",
+      "item": [
+        {"name": "All machines", "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/machines"}},
+        {"name": "Machine by ID", "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/machines/{{machine_id}}"}}
+      ]
+    },
+    {
+      "name": "Robots",
+      "item": [
+        {"name": "All robots", "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/robots"}},
+        {"name": "Robot by ID", "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/robots/{{robot_id}}"}},
+        {"name": "Robot weight readings", "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/robot-weight"}},
+        {"name": "Stop one robot", "request": {"method": "POST", "header": [], "url": "{{base_url}}/api/robots/{{robot_id}}/command/STOP"}},
+        {"name": "Resume one robot", "request": {"method": "POST", "header": [], "url": "{{base_url}}/api/robots/{{robot_id}}/command/RESUME"}},
+        {"name": "Charge one robot", "request": {"method": "POST", "header": [], "url": "{{base_url}}/api/robots/{{robot_id}}/command/CHARGE"}}
+      ]
+    },
+    {
+      "name": "Forklifts",
+      "item": [
+        {"name": "All forklifts", "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/forklifts"}},
+        {"name": "Forklift by ID", "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/forklifts/{{forklift_id}}"}}
+      ]
+    },
+    {
+      "name": "Control",
+      "item": [
+        {"name": "All configured devices", "request": {"method": "GET", "header": [], "url": "{{base_url}}/api/devices"}},
+        {
+          "name": "Stop device",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {"mode": "raw", "raw": "{\n  \"enabled\": false\n}", "options": {"raw": {"language": "json"}}},
+            "url": "{{base_url}}/api/devices/{{device_id}}/toggle"
+          }
+        },
+        {
+          "name": "Resume device",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {"mode": "raw", "raw": "{\n  \"enabled\": true\n}", "options": {"raw": {"language": "json"}}},
+            "url": "{{base_url}}/api/devices/{{device_id}}/toggle"
+          }
+        },
+        {"name": "Global emergency stop", "request": {"method": "POST", "header": [], "url": "{{base_url}}/api/emergency/STOP"}},
+        {"name": "Global resume", "request": {"method": "POST", "header": [], "url": "{{base_url}}/api/emergency/RESUME"}}
+      ]
+    },
+    {
+      "name": "Realtime WebSocket",
+      "description": "Postman: New > WebSocket, connect to {{ws_url}}, then observe the immediate snapshot and subsequent live events. Flutter should use REST, not inbound WebSocket messages, for control commands.",
+      "item": []
+    }
+  ]
+}

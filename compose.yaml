@@ -1,0 +1,36 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: warehouse-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - emqx
+    networks:
+      - warehouse-net
+
+  emqx:
+    image: emqx/emqx:5.8.8
+    container_name: warehouse-emqx
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "8083:8083"
+      - "18083:18083"
+    volumes:
+      - emqx-data:/opt/emqx/data
+      - emqx-log:/opt/emqx/log
+    networks:
+      - warehouse-net
+
+networks:
+  warehouse-net:
+
+volumes:
+  emqx-data:
+  emqx-log:
