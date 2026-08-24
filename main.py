@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 app = FastAPI(
     title="Digital Twin Warehouse IIoT Gateway",
     description="REST, WebSocket, and MQTT gateway between Unity, Flutter, EMQX, and InfluxDB.",
-    version="1.2.0",
+    version="1.2.1",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
@@ -338,7 +338,7 @@ def send_mqtt_command(command_str: str, device_id: Optional[str] = None, robot_i
         pub_client = mqtt.Client()
         pub_client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, 60)
         pub_client.loop_start()
-        result = pub_client.publish(TOPIC_CONTROL, json.dumps(payload))
+        result = pub_client.publish(TOPIC_CONTROL, json.dumps(payload), qos=1)
         result.wait_for_publish(timeout=3)
         pub_client.loop_stop()
         pub_client.disconnect()
@@ -409,6 +409,7 @@ def handle_machine_telemetry(payload: dict):
         latest_cache["machines"][machine_id] = normalized
         update_device_report(machine_id, normalized["active"])
 
+    dispatch_pending_device_command(machine_id)
     broadcast_from_mqtt("machine_telemetry", normalized)
     point = Point("machine_telemetry").tag("machine_id", machine_id)
     for key in (
@@ -460,6 +461,7 @@ def handle_robot_telemetry(payload: dict):
         latest_cache["robots"][robot_id] = normalized
         update_device_report(robot_id, reported_enabled)
 
+    dispatch_pending_device_command(robot_id)
     broadcast_from_mqtt("robot_telemetry", normalized)
     point = Point("robot_telemetry").tag("robot_id", robot_id)
     for key in ("battery", "status", "low_battery", "safety_stop"):
@@ -516,6 +518,7 @@ def handle_forklift_telemetry(payload: dict):
         latest_cache["forklifts"][forklift_id] = normalized
         update_device_report(forklift_id, reported_enabled)
 
+    dispatch_pending_device_command(forklift_id)
     broadcast_from_mqtt("forklift_telemetry", normalized)
     point = Point("forklift_telemetry").tag("forklift_id", forklift_id)
     for key in ("battery", "speed", "status", "event_name"):
@@ -579,6 +582,34 @@ def add_field(point: Point, key: str, value: Any):
         point.field(key, float(value))
     else:
         point.field(key, str(value))
+
+
+def dispatch_pending_device_command(device_id: str):
+    with cache_lock:
+        device = latest_cache["devices"].get(device_id)
+        if device is None or not device.get("pending", False):
+            return
+
+        last_command_at = parse_iso(device.get("last_command_at"))
+        if last_command_at is not None:
+            elapsed = (datetime.now(timezone.utc) - last_command_at).total_seconds()
+            if elapsed < 2:
+                return
+
+        command = "RESUME" if device["desired_enabled"] else "STOP"
+        device["last_command"] = command
+        device["last_command_at"] = utc_now_iso()
+
+    try:
+        mqtt_payload = send_mqtt_command(command, device_id=device_id)
+    except HTTPException as exc:
+        print(f"Pending command delivery failed for {device_id}: {exc.detail}")
+        return
+
+    with cache_lock:
+        device = latest_cache["devices"].get(device_id)
+        if device is not None:
+            device["last_mqtt_payload"] = mqtt_payload
 
 
 def start_mqtt_thread():
@@ -903,11 +934,7 @@ def toggle_device(device_id: str, body: Optional[DeviceToggleRequest] = Body(def
     snapshot_device = build_snapshot()["devices"].get(device_id)
     if snapshot_device is None:
         raise HTTPException(status_code=404, detail="Unknown device_id")
-    if not snapshot_device.get("online", False):
-        raise HTTPException(
-            status_code=409,
-            detail=f"{device_id} is offline. Start Unity and wait for live telemetry before sending control commands.",
-        )
+    is_online = snapshot_device.get("online", False)
 
     with cache_lock:
         current = latest_cache["devices"].get(device_id)
@@ -920,7 +947,14 @@ def toggle_device(device_id: str, body: Optional[DeviceToggleRequest] = Body(def
         )
 
     command = "RESUME" if next_enabled else "STOP"
-    mqtt_payload = send_mqtt_command(command, device_id=device_id)
+    mqtt_payload = {
+        "command": command,
+        "sender": "central_backend_gateway",
+        "device_id": device_id,
+    }
+    if is_online:
+        mqtt_payload = send_mqtt_command(command, device_id=device_id)
+
     with cache_lock:
         current.update({
             "desired_enabled": next_enabled,
@@ -931,10 +965,17 @@ def toggle_device(device_id: str, body: Optional[DeviceToggleRequest] = Body(def
         })
         response_device = deepcopy(current)
     broadcast_from_mqtt("device_command", response_device)
+
+    status = "COMMAND_SENT" if is_online else "COMMAND_QUEUED"
+    message = (
+        f"Waiting for {device_id} to confirm {command}"
+        if is_online
+        else f"{command} queued until {device_id} reconnects"
+    )
     return {
-        "status": "COMMAND_SENT",
+        "status": status,
         "device": response_device,
-        "message": f"Waiting for {device_id} to confirm {command}",
+        "message": message,
     }
 
 
