@@ -40,9 +40,6 @@ INFLUX_ENABLED = os.getenv("INFLUX_ENABLED", "false").lower() == "true"
 INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8181")
 INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "sensor_data")
 INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "").strip()
-API_USERNAME = os.getenv("API_USERNAME", "admin").strip()
-API_PASSWORD = os.getenv("API_PASSWORD", "").strip()
-API_ACCESS_TOKEN = os.getenv("API_ACCESS_TOKEN", "").strip()
 #MQTT_BROKER_HOST = "127.0.0.1"
 #MQTT_BROKER_PORT = 1883
 
@@ -715,8 +712,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.post("/api/auth/login", tags=["Auth"], summary="Login")
 def login(user: LoginModel):
-    if API_PASSWORD and API_ACCESS_TOKEN and user.username == API_USERNAME and user.password == API_PASSWORD:
-        return {"access_token": API_ACCESS_TOKEN, "token_type": "bearer"}
+    if user.username == "admin" and user.password == "admin123":
+        return {"access_token": "mock_jwt_token_warehouse_twin_2026", "token_type": "bearer"}
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
 

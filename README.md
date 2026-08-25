@@ -25,7 +25,7 @@ Open:
 - Health: `http://127.0.0.1:8000/api/health`
 - WebSocket: `ws://127.0.0.1:8000/ws/sensors`
 
-Set `API_PASSWORD` and `API_ACCESS_TOKEN` in `.env` before using the login endpoint. Never commit `.env`.
+The demo login endpoint uses the fixed project credentials expected by the Flutter application.
 
 ## Documentation
 
