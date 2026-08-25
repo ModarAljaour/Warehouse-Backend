@@ -76,10 +76,15 @@ class BackendLogicTests(unittest.TestCase):
         self.assertEqual(message.android.priority, "high")
         self.assertEqual(message.android.notification.channel_id, "warehouse_fire_alerts")
 
-    def test_influx_write_uses_line_protocol_content_type(self):
-        headers = main.influx_headers("text/plain")
+    def test_influx_history_builds_flux_query(self):
+        flux = main.build_history_flux(
+            "environment_telemetry", 12, 100, "sensor_id", "sensor_01"
+        )
 
-        self.assertEqual(headers["Content-Type"], "text/plain")
+        self.assertIn('from(bucket: "warehouse")', flux)
+        self.assertIn("range(start: -12h)", flux)
+        self.assertIn('r["sensor_id"] == "sensor_01"', flux)
+        self.assertIn("limit(n: 100)", flux)
 
     def test_environment_sensor_history_uses_environment_table(self):
         calls = []

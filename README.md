@@ -36,7 +36,7 @@ For Docker Compose, save the key as `secrets/firebase-service-account.json`. It 
 
 ## InfluxDB history
 
-The backend uses InfluxDB 3 Core and the `warehouse` database. Generate an offline admin token file at `secrets/influx-admin-token.json`, start the `influxdb` service, and create the database with a 90-day retention period. The database port is only available inside the Docker network; history is exposed through the backend `/api/history/*` endpoints.
+The backend uses InfluxDB OSS 2.9.1 because it supports older virtual CPUs without AVX. Create the three ignored secret files documented in `compose.yaml`, then start the `influxdb` service. Docker initializes the `warehouse` organization and bucket with a 90-day retention period. Port 8086 is only available inside the Docker network; history is exposed through the backend `/api/history/*` endpoints.
 
 ## Documentation
 

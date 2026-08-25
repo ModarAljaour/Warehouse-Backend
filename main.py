@@ -3,17 +3,16 @@ import asyncio
 import json
 import threading
 import time
-import urllib.error
-import urllib.request
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from queue import Full, Queue
 from typing import Any, Dict, List, Optional
 
 import paho.mqtt.client as mqtt
 from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from influxdb_client import Point
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
 from pydantic import BaseModel, Field
 
 try:
@@ -45,10 +44,11 @@ MQTT_BROKER_HOST = os.getenv("MQTT_BROKER_HOST", "emqx")
 MQTT_BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 
 INFLUX_ENABLED = os.getenv("INFLUX_ENABLED", "false").lower() == "true"
-INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8181")
-INFLUX_DATABASE = os.getenv(
-    "INFLUX_DATABASE",
-    os.getenv("INFLUX_BUCKET", "warehouse"),
+INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
+INFLUX_ORG = os.getenv("INFLUX_ORG", "warehouse").strip()
+INFLUX_BUCKET = os.getenv(
+    "INFLUX_BUCKET",
+    os.getenv("INFLUX_DATABASE", "warehouse"),
 ).strip()
 INFLUX_TOKEN_FILE = os.getenv("INFLUX_TOKEN_FILE", "").strip()
 
@@ -59,9 +59,13 @@ def load_influx_token() -> str:
         return token
     try:
         with open(INFLUX_TOKEN_FILE, "r", encoding="utf-8") as token_file:
-            token_data = json.load(token_file)
+            raw_token = token_file.read().strip()
+        try:
+            token_data = json.loads(raw_token)
+        except json.JSONDecodeError:
+            return raw_token
         return str(token_data.get("token", "")).strip()
-    except (OSError, ValueError, TypeError) as exc:
+    except (OSError, TypeError) as exc:
         print(f"InfluxDB token file could not be read: {exc}")
         return ""
 
@@ -91,8 +95,8 @@ CONFIGURED_CONVEYOR_IDS = ["conveyor_01"]
 CONFIGURED_ENVIRONMENT_SENSOR_IDS = [f"sensor_{index:02d}" for index in range(1, 7)]
 ONLINE_TIMEOUT_SECONDS = int(os.getenv("ONLINE_TIMEOUT_SECONDS", "60"))
 
-#INFLUX_URL = "http://localhost:8181"
-#INFLUX_DATABASE = "warehouse"
+#INFLUX_URL = "http://localhost:8086"
+#INFLUX_BUCKET = "warehouse"
 
 
 def utc_now_iso() -> str:
@@ -257,21 +261,29 @@ def write_point(point: Point):
         print(last_influx_error)
 
 
+def create_influx_client() -> InfluxDBClient:
+    if not INFLUX_TOKEN:
+        raise RuntimeError("InfluxDB token is missing")
+    return InfluxDBClient(
+        url=INFLUX_URL,
+        token=INFLUX_TOKEN,
+        org=INFLUX_ORG,
+        timeout=10000,
+    )
+
+
 def start_influx_writer_thread():
     global last_influx_write_at, last_influx_error
+    influx_client = create_influx_client()
+    write_api = influx_client.write_api(write_options=SYNCHRONOUS)
     while True:
         point = influx_queue.get()
         try:
-            line_protocol = point.to_line_protocol()
-            request = urllib.request.Request(
-                f"{INFLUX_URL}/api/v3/write_lp?db={INFLUX_DATABASE}",
-                data=line_protocol.encode("utf-8"),
-                method="POST",
-                headers=influx_headers("text/plain"),
+            write_api.write(
+                bucket=INFLUX_BUCKET,
+                org=INFLUX_ORG,
+                record=point,
             )
-            with urllib.request.urlopen(request, timeout=2) as response:
-                if response.status not in (200, 204):
-                    raise RuntimeError(f"InfluxDB returned HTTP {response.status}")
             last_influx_write_at = utc_now_iso()
             last_influx_error = None
         except Exception as exc:
@@ -281,52 +293,74 @@ def start_influx_writer_thread():
             influx_queue.task_done()
 
 
-def influx_headers(content_type: Optional[str] = None) -> dict:
-    headers = {"Accept": "application/json"}
-    if content_type:
-        headers["Content-Type"] = content_type
-    if INFLUX_TOKEN:
-        headers["Authorization"] = f"Bearer {INFLUX_TOKEN}"
-    return headers
+def flux_string(value: str) -> str:
+    return json.dumps(str(value))
 
 
-def query_influx(sql: str, params: Optional[dict] = None):
+def build_history_flux(
+    measurement: str,
+    hours: int,
+    limit: int,
+    tag_field: Optional[str] = None,
+    tag_value: Optional[str] = None,
+) -> str:
+    filters = [
+        f'  |> filter(fn: (r) => r._measurement == {flux_string(measurement)})'
+    ]
+    if tag_field and tag_value is not None:
+        filters.append(
+            f'  |> filter(fn: (r) => r[{flux_string(tag_field)}] == '
+            f'{flux_string(tag_value)})'
+        )
+    return "\n".join([
+        f'from(bucket: {flux_string(INFLUX_BUCKET)})',
+        f'  |> range(start: -{int(hours)}h)',
+        *filters,
+        '  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")',
+        '  |> sort(columns: ["_time"], desc: true)',
+        f'  |> limit(n: {int(limit)})',
+    ])
+
+
+def query_influx(
+    measurement: str,
+    hours: int,
+    limit: int,
+    tag_field: Optional[str] = None,
+    tag_value: Optional[str] = None,
+):
     if not INFLUX_ENABLED:
         raise HTTPException(status_code=503, detail="InfluxDB history is disabled")
-
-    body = json.dumps({
-        "db": INFLUX_DATABASE,
-        "q": sql,
-        "format": "json",
-        "params": params or {},
-    }).encode("utf-8")
-    request = urllib.request.Request(
-        f"{INFLUX_URL}/api/v3/query_sql",
-        data=body,
-        method="POST",
-        headers=influx_headers("application/json"),
-    )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            raw = response.read().decode("utf-8")
-            return json.loads(raw) if raw else []
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise HTTPException(
-            status_code=502,
-            detail=f"InfluxDB query failed ({exc.code}): {detail}",
-        ) from exc
+        flux = build_history_flux(
+            measurement, hours, limit, tag_field, tag_value
+        )
+        with create_influx_client() as influx_client:
+            tables = influx_client.query_api().query(
+                query=flux,
+                org=INFLUX_ORG,
+            )
+        rows = []
+        ignored_columns = {"result", "table", "_start", "_stop", "_measurement"}
+        for table in tables:
+            for record in table.records:
+                row = {}
+                for key, value in record.values.items():
+                    if key in ignored_columns:
+                        continue
+                    output_key = "time" if key == "_time" else key
+                    row[output_key] = (
+                        value.isoformat().replace("+00:00", "Z")
+                        if isinstance(value, datetime)
+                        else value
+                    )
+                rows.append(row)
+        return rows
     except Exception as exc:
         raise HTTPException(
             status_code=503,
             detail=f"InfluxDB is unavailable: {exc}",
         ) from exc
-
-
-def history_start(hours: int) -> str:
-    return (
-        datetime.now(timezone.utc) - timedelta(hours=hours)
-    ).isoformat().replace("+00:00", "Z")
 
 
 def query_device_history(
@@ -336,15 +370,7 @@ def query_device_history(
     hours: int,
     limit: int,
 ):
-    sql = (
-        f'SELECT * FROM "{table}" '
-        f'WHERE time >= $start_time AND "{id_field}" = $device_id '
-        f'ORDER BY time DESC LIMIT {limit}'
-    )
-    return query_influx(sql, {
-        "start_time": history_start(hours),
-        "device_id": device_id,
-    })
+    return query_influx(table, hours, limit, id_field, device_id)
 
 
 def update_device_report(device_id: str, reported_enabled: bool):
@@ -768,12 +794,8 @@ def health_check():
     influx_connected = False
     if INFLUX_ENABLED:
         try:
-            request = urllib.request.Request(
-                f"{INFLUX_URL}/health",
-                headers=influx_headers(),
-            )
-            with urllib.request.urlopen(request, timeout=2) as response:
-                influx_connected = response.status == 200
+            with create_influx_client() as influx_client:
+                influx_connected = bool(influx_client.ping())
         except Exception:
             influx_connected = False
     return {
@@ -787,7 +809,8 @@ def health_check():
             "enabled": INFLUX_ENABLED,
             "connected": influx_connected,
             "url": INFLUX_URL,
-            "database": INFLUX_DATABASE,
+            "org": INFLUX_ORG,
+            "bucket": INFLUX_BUCKET,
             "last_write_at": last_influx_write_at,
             "last_error": last_influx_error,
             "queued_writes": influx_queue.qsize(),
@@ -1013,18 +1036,13 @@ def get_alert_history(
     hours: int = Query(24, ge=1, le=720),
     limit: int = Query(200, ge=1, le=2000),
 ):
-    start_time = history_start(hours)
     histories = {}
     for alert_type, table in (
         ("machines", "machine_alerts"),
         ("robots", "robot_alerts"),
         ("forklifts", "forklift_alerts"),
     ):
-        histories[alert_type] = query_influx(
-            f'SELECT * FROM "{table}" '
-            f'WHERE time >= $start_time ORDER BY time DESC LIMIT {limit}',
-            {"start_time": start_time},
-        )
+        histories[alert_type] = query_influx(table, hours, limit)
     return {"hours": hours, "alerts": histories}
 
 

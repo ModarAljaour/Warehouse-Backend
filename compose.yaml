@@ -34,20 +34,24 @@ services:
       - warehouse-net
 
   influxdb:
-    image: influxdb:3.11.2-core
+    image: influxdb:2.9.1
     container_name: warehouse-influxdb
     restart: unless-stopped
-    command:
-      - influxdb3
-      - serve
-      - --node-id=warehouse-node
-      - --object-store=file
-      - --data-dir=/var/lib/influxdb3/data
-      - --admin-token-file=/run/secrets/influx-admin-token
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME_FILE: /run/secrets/influx-admin-username
+      DOCKER_INFLUXDB_INIT_PASSWORD_FILE: /run/secrets/influx-admin-password
+      DOCKER_INFLUXDB_INIT_ORG: warehouse
+      DOCKER_INFLUXDB_INIT_BUCKET: warehouse
+      DOCKER_INFLUXDB_INIT_RETENTION: 2160h
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN_FILE: /run/secrets/influx-admin-token
     secrets:
       - influx-admin-token
+      - influx-admin-username
+      - influx-admin-password
     volumes:
-      - influx-data:/var/lib/influxdb3/data
+      - influx-data:/var/lib/influxdb2
+      - influx-config:/etc/influxdb2
     networks:
       - warehouse-net
 
@@ -58,7 +62,12 @@ volumes:
   emqx-data:
   emqx-log:
   influx-data:
+  influx-config:
 
 secrets:
   influx-admin-token:
-    file: ./secrets/influx-admin-token.json
+    file: ./secrets/influx-admin-token.txt
+  influx-admin-username:
+    file: ./secrets/influx-admin-username.txt
+  influx-admin-password:
+    file: ./secrets/influx-admin-password.txt
