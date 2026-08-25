@@ -31,6 +31,8 @@ class BackendLogicTests(unittest.TestCase):
         self.original_messaging = main.messaging
         self.original_firebase_app = main.firebase_app
         self.original_query_device_history = main.query_device_history
+        self.original_fire_emergency_state = main.fire_emergency_state
+        self.original_devices = deepcopy(main.latest_cache["devices"])
 
     def tearDown(self):
         main.latest_cache["devices"]["arm_1"] = self.original_device
@@ -39,6 +41,8 @@ class BackendLogicTests(unittest.TestCase):
         main.messaging = self.original_messaging
         main.firebase_app = self.original_firebase_app
         main.query_device_history = self.original_query_device_history
+        main.fire_emergency_state = self.original_fire_emergency_state
+        main.latest_cache["devices"] = self.original_devices
 
     def test_queued_command_is_dispatched_once(self):
         calls = []
@@ -77,6 +81,32 @@ class BackendLogicTests(unittest.TestCase):
         self.assertEqual(message.data["event"], "FIRE_EMERGENCY")
         self.assertEqual(message.android.priority, "high")
         self.assertEqual(message.android.notification.channel_id, "warehouse_fire_alerts")
+
+    def test_fire_emergency_stops_all_devices_only_once(self):
+        calls = []
+        main.fire_emergency_state = "idle"
+        main.send_mqtt_command = lambda command, device_id=None, robot_id=None: (
+            calls.append(command) or {"command": command}
+        )
+        main.messaging = None
+        for device in main.latest_cache["devices"].values():
+            device.update({
+                "desired_enabled": True,
+                "reported_enabled": True,
+                "pending": False,
+            })
+
+        first = main.trigger_fire_emergency({"machine_id": "arm_1", "fire_detected": True})
+        second = main.trigger_fire_emergency({"machine_id": "arm_1", "fire_detected": True})
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(calls, ["STOP"])
+        self.assertEqual(main.fire_emergency_state, "active")
+        for device in main.latest_cache["devices"].values():
+            self.assertFalse(device["desired_enabled"])
+            self.assertTrue(device["pending"])
+            self.assertEqual(device["last_command"], "STOP")
 
     def test_influx_history_builds_flux_query(self):
         flux = main.build_history_flux(

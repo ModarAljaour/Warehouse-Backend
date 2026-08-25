@@ -87,6 +87,7 @@ TOPIC_ENVIRONMENT_TELEMETRY = "warehouse/environment/telemetry"
 TOPIC_CONTROL = "warehouse/control"
 
 firebase_app = None
+fire_emergency_state = "idle"
 
 CONFIGURED_MACHINE_IDS = ["arm_1"]
 CONFIGURED_ROBOT_IDS = ["agv_01", "agv_02"]
@@ -499,6 +500,48 @@ def send_fire_notification(payload: dict):
         print(f"Firebase fire notification failed: {exc}")
 
 
+def update_all_device_commands(command: str, mqtt_payload: dict):
+    desired_enabled = command != "STOP"
+    command_at = utc_now_iso()
+    with cache_lock:
+        for device in latest_cache["devices"].values():
+            device.update({
+                "desired_enabled": desired_enabled,
+                "pending": device.get("reported_enabled") != desired_enabled,
+                "command_queued": False,
+                "last_command": command,
+                "last_command_at": command_at,
+                "last_mqtt_payload": mqtt_payload,
+            })
+
+
+def trigger_fire_emergency(payload: dict) -> bool:
+    global fire_emergency_state
+    with cache_lock:
+        if fire_emergency_state != "idle":
+            return False
+        fire_emergency_state = "triggering"
+
+    try:
+        mqtt_payload = send_mqtt_command("STOP")
+    except HTTPException as exc:
+        with cache_lock:
+            fire_emergency_state = "idle"
+        print(f"Fire emergency STOP failed: {exc.detail}")
+        return False
+
+    update_all_device_commands("STOP", mqtt_payload)
+    with cache_lock:
+        fire_emergency_state = "active"
+    broadcast_from_mqtt("emergency_command", {
+        "command": "STOP",
+        "reason": "fire",
+        "mqtt_payload": mqtt_payload,
+    })
+    send_fire_notification(payload)
+    return True
+
+
 def on_connect(client, userdata, flags, rc):
     global mqtt_connected
     mqtt_connected = rc == 0
@@ -587,7 +630,7 @@ def handle_machine_alert(payload: dict):
     add_alert("machine_alert", payload)
     if payload.get("fire_detected") or str(payload.get("event", "")).upper() == "FIRE_EMERGENCY":
         threading.Thread(
-            target=send_fire_notification,
+            target=trigger_fire_emergency,
             args=(payload,),
             daemon=True,
         ).start()
@@ -1173,10 +1216,16 @@ def toggle_device(device_id: str, body: Optional[DeviceToggleRequest] = Body(def
 
 @app.post("/api/emergency/{action}", tags=["Control"], summary="Send emergency command to Unity")
 def remote_emergency_control(action: str):
+    global fire_emergency_state
     command = action.upper()
     if command not in {"STOP", "RESUME", "RESET", "CLEAR", "CHARGE"}:
         raise HTTPException(status_code=400, detail="Use STOP, RESUME, RESET, CLEAR, or CHARGE")
     mqtt_payload = send_mqtt_command(command)
+    if command in {"STOP", "RESUME"}:
+        update_all_device_commands(command, mqtt_payload)
+    if command in {"RESUME", "RESET", "CLEAR"}:
+        with cache_lock:
+            fire_emergency_state = "idle"
     return {"status": "COMMAND_SENT", "mqtt_payload": mqtt_payload, "message": f"Global {command} sent"}
 
 
