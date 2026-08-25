@@ -26,6 +26,7 @@ class _FakeMessaging:
 class BackendLogicTests(unittest.TestCase):
     def setUp(self):
         self.original_device = deepcopy(main.latest_cache["devices"]["arm_1"])
+        self.original_robot_device = deepcopy(main.latest_cache["devices"]["agv_01"])
         self.original_send_mqtt = main.send_mqtt_command
         self.original_messaging = main.messaging
         self.original_firebase_app = main.firebase_app
@@ -33,6 +34,7 @@ class BackendLogicTests(unittest.TestCase):
 
     def tearDown(self):
         main.latest_cache["devices"]["arm_1"] = self.original_device
+        main.latest_cache["devices"]["agv_01"] = self.original_robot_device
         main.send_mqtt_command = self.original_send_mqtt
         main.messaging = self.original_messaging
         main.firebase_app = self.original_firebase_app
@@ -78,25 +80,65 @@ class BackendLogicTests(unittest.TestCase):
 
     def test_influx_history_builds_flux_query(self):
         flux = main.build_history_flux(
-            "environment_telemetry", 12, 100, "sensor_id", "sensor_01"
+            "environment_telemetry",
+            12,
+            100,
+            "sensor_id",
+            "sensor_01",
+            fields=("temperature", "humidity"),
+            aggregate_seconds=432,
         )
 
         self.assertIn('from(bucket: "warehouse")', flux)
         self.assertIn("range(start: -12h)", flux)
         self.assertIn('r["sensor_id"] == "sensor_01"', flux)
+        self.assertIn(
+            'contains(value: r._field, set: ["temperature", "humidity"])',
+            flux,
+        )
+        self.assertIn("aggregateWindow(every: 432s", flux)
         self.assertIn("limit(n: 100)", flux)
 
     def test_environment_sensor_history_uses_environment_table(self):
         calls = []
-        main.query_device_history = lambda *args: calls.append(args) or []
+        main.query_device_history = (
+            lambda *args, **kwargs: calls.append((args, kwargs)) or []
+        )
 
         response = main.get_environment_sensor_history("SENSOR_01", 12, 100)
 
         self.assertEqual(response["sensor_id"], "sensor_01")
         self.assertEqual(
             calls,
-            [("environment_telemetry", "sensor_id", "sensor_01", 12, 100)],
+            [
+                (
+                    ("environment_telemetry", "sensor_id", "sensor_01", 12, 100),
+                    {
+                        "fields": ("temperature", "humidity"),
+                        "aggregate_seconds": 432,
+                    },
+                )
+            ],
         )
+
+    def test_robot_command_updates_shared_device_state(self):
+        main.send_mqtt_command = lambda command, device_id=None, robot_id=None: {
+            "command": command,
+            "robot_id": robot_id,
+        }
+        device = main.latest_cache["devices"]["agv_01"]
+        device.update({
+            "desired_enabled": False,
+            "reported_enabled": False,
+            "pending": False,
+        })
+
+        response = main.robot_control("AGV_01", "resume")
+
+        self.assertEqual(response["mqtt_payload"]["robot_id"], "agv_01")
+        self.assertTrue(response["device"]["desired_enabled"])
+        self.assertTrue(response["device"]["pending"])
+        self.assertEqual(response["device"]["last_command"], "RESUME")
 
 
 if __name__ == "__main__":

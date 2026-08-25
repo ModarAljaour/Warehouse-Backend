@@ -303,6 +303,8 @@ def build_history_flux(
     limit: int,
     tag_field: Optional[str] = None,
     tag_value: Optional[str] = None,
+    fields: Optional[tuple[str, ...]] = None,
+    aggregate_seconds: Optional[int] = None,
 ) -> str:
     filters = [
         f'  |> filter(fn: (r) => r._measurement == {flux_string(measurement)})'
@@ -312,14 +314,26 @@ def build_history_flux(
             f'  |> filter(fn: (r) => r[{flux_string(tag_field)}] == '
             f'{flux_string(tag_value)})'
         )
-    return "\n".join([
+    if fields:
+        field_set = ", ".join(flux_string(field) for field in fields)
+        filters.append(
+            f"  |> filter(fn: (r) => contains(value: r._field, set: [{field_set}]))"
+        )
+    pipeline = [
         f'from(bucket: {flux_string(INFLUX_BUCKET)})',
         f'  |> range(start: -{int(hours)}h)',
         *filters,
+    ]
+    if aggregate_seconds:
+        pipeline.append(
+            f"  |> aggregateWindow(every: {int(aggregate_seconds)}s, fn: mean, createEmpty: false)"
+        )
+    pipeline.extend([
         '  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")',
         '  |> sort(columns: ["_time"], desc: true)',
         f'  |> limit(n: {int(limit)})',
     ])
+    return "\n".join(pipeline)
 
 
 def query_influx(
@@ -328,12 +342,20 @@ def query_influx(
     limit: int,
     tag_field: Optional[str] = None,
     tag_value: Optional[str] = None,
+    fields: Optional[tuple[str, ...]] = None,
+    aggregate_seconds: Optional[int] = None,
 ):
     if not INFLUX_ENABLED:
         raise HTTPException(status_code=503, detail="InfluxDB history is disabled")
     try:
         flux = build_history_flux(
-            measurement, hours, limit, tag_field, tag_value
+            measurement,
+            hours,
+            limit,
+            tag_field,
+            tag_value,
+            fields,
+            aggregate_seconds,
         )
         with create_influx_client() as influx_client:
             tables = influx_client.query_api().query(
@@ -369,8 +391,18 @@ def query_device_history(
     device_id: str,
     hours: int,
     limit: int,
+    fields: Optional[tuple[str, ...]] = None,
+    aggregate_seconds: Optional[int] = None,
 ):
-    return query_influx(table, hours, limit, id_field, device_id)
+    return query_influx(
+        table,
+        hours,
+        limit,
+        id_field,
+        device_id,
+        fields,
+        aggregate_seconds,
+    )
 
 
 def update_device_report(device_id: str, reported_enabled: bool):
@@ -1025,8 +1057,15 @@ def get_environment_sensor_history(
     sensor_id = sensor_id.lower()
     if sensor_id not in CONFIGURED_ENVIRONMENT_SENSOR_IDS:
         raise HTTPException(status_code=404, detail="Environment sensor not found")
+    aggregate_seconds = max(1, (hours * 3600 + limit - 1) // limit)
     data = query_device_history(
-        "environment_telemetry", "sensor_id", sensor_id, hours, limit
+        "environment_telemetry",
+        "sensor_id",
+        sensor_id,
+        hours,
+        limit,
+        fields=("temperature", "humidity"),
+        aggregate_seconds=aggregate_seconds,
     )
     return {"sensor_id": sensor_id, "hours": hours, "data": data}
 
@@ -1150,4 +1189,26 @@ def robot_control(robot_id: str, action: str):
     if command not in {"STOP", "RESUME", "RESET", "CLEAR", "CHARGE"}:
         raise HTTPException(status_code=400, detail="Use STOP, RESUME, RESET, CLEAR, or CHARGE")
     mqtt_payload = send_mqtt_command(command, robot_id=robot_id)
-    return {"status": "COMMAND_SENT", "robot_id": robot_id, "mqtt_payload": mqtt_payload}
+    desired_enabled = command != "STOP"
+    with cache_lock:
+        device = latest_cache["devices"].get(robot_id)
+        if device is not None:
+            device.update({
+                "desired_enabled": desired_enabled,
+                "pending": device.get("reported_enabled") != desired_enabled,
+                "command_queued": False,
+                "last_command": command,
+                "last_command_at": utc_now_iso(),
+                "last_mqtt_payload": mqtt_payload,
+            })
+            response_device = deepcopy(device)
+        else:
+            response_device = None
+    if response_device is not None:
+        broadcast_from_mqtt("device_command", response_device)
+    return {
+        "status": "COMMAND_SENT",
+        "robot_id": robot_id,
+        "mqtt_payload": mqtt_payload,
+        "device": response_device,
+    }
