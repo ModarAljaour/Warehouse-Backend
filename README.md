@@ -34,6 +34,10 @@ Download a Firebase Admin service-account JSON file and keep it outside the repo
 
 For Docker Compose, save the key as `secrets/firebase-service-account.json`. It is mounted read-only at `/run/secrets/firebase-service-account.json` and the entire `secrets` directory is ignored by Git.
 
+## InfluxDB history
+
+The backend uses InfluxDB 3 Core and the `warehouse` database. Generate an offline admin token file at `secrets/influx-admin-token.json`, start the `influxdb` service, and create the database with a 90-day retention period. The database port is only available inside the Docker network; history is exposed through the backend `/api/history/*` endpoints.
+
 ## Documentation
 
 - Flutter integration: `FLUTTER_API.md`

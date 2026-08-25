@@ -46,8 +46,27 @@ MQTT_BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 
 INFLUX_ENABLED = os.getenv("INFLUX_ENABLED", "false").lower() == "true"
 INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8181")
-INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "sensor_data")
-INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "").strip()
+INFLUX_DATABASE = os.getenv(
+    "INFLUX_DATABASE",
+    os.getenv("INFLUX_BUCKET", "warehouse"),
+).strip()
+INFLUX_TOKEN_FILE = os.getenv("INFLUX_TOKEN_FILE", "").strip()
+
+
+def load_influx_token() -> str:
+    token = os.getenv("INFLUX_TOKEN", "").strip()
+    if token or not INFLUX_TOKEN_FILE:
+        return token
+    try:
+        with open(INFLUX_TOKEN_FILE, "r", encoding="utf-8") as token_file:
+            token_data = json.load(token_file)
+        return str(token_data.get("token", "")).strip()
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"InfluxDB token file could not be read: {exc}")
+        return ""
+
+
+INFLUX_TOKEN = load_influx_token()
 FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS", "").strip()
 FCM_TOPIC = os.getenv("FCM_TOPIC", "warehouse_alerts").strip()
 #MQTT_BROKER_HOST = "127.0.0.1"
@@ -73,7 +92,7 @@ CONFIGURED_ENVIRONMENT_SENSOR_IDS = [f"sensor_{index:02d}" for index in range(1,
 ONLINE_TIMEOUT_SECONDS = int(os.getenv("ONLINE_TIMEOUT_SECONDS", "60"))
 
 #INFLUX_URL = "http://localhost:8181"
-#INFLUX_BUCKET = "sensor_data"
+#INFLUX_DATABASE = "warehouse"
 
 
 def utc_now_iso() -> str:
@@ -245,10 +264,10 @@ def start_influx_writer_thread():
         try:
             line_protocol = point.to_line_protocol()
             request = urllib.request.Request(
-                f"{INFLUX_URL}/api/v3/write_lp?db={INFLUX_BUCKET}",
+                f"{INFLUX_URL}/api/v3/write_lp?db={INFLUX_DATABASE}",
                 data=line_protocol.encode("utf-8"),
                 method="POST",
-                headers=influx_headers(),
+                headers=influx_headers("text/plain"),
             )
             with urllib.request.urlopen(request, timeout=2) as response:
                 if response.status not in (200, 204):
@@ -262,11 +281,10 @@ def start_influx_writer_thread():
             influx_queue.task_done()
 
 
-def influx_headers() -> dict:
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
+def influx_headers(content_type: Optional[str] = None) -> dict:
+    headers = {"Accept": "application/json"}
+    if content_type:
+        headers["Content-Type"] = content_type
     if INFLUX_TOKEN:
         headers["Authorization"] = f"Bearer {INFLUX_TOKEN}"
     return headers
@@ -277,7 +295,7 @@ def query_influx(sql: str, params: Optional[dict] = None):
         raise HTTPException(status_code=503, detail="InfluxDB history is disabled")
 
     body = json.dumps({
-        "db": INFLUX_BUCKET,
+        "db": INFLUX_DATABASE,
         "q": sql,
         "format": "json",
         "params": params or {},
@@ -286,7 +304,7 @@ def query_influx(sql: str, params: Optional[dict] = None):
         f"{INFLUX_URL}/api/v3/query_sql",
         data=body,
         method="POST",
-        headers=influx_headers(),
+        headers=influx_headers("application/json"),
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -769,6 +787,7 @@ def health_check():
             "enabled": INFLUX_ENABLED,
             "connected": influx_connected,
             "url": INFLUX_URL,
+            "database": INFLUX_DATABASE,
             "last_write_at": last_influx_write_at,
             "last_error": last_influx_error,
             "queued_writes": influx_queue.qsize(),
@@ -970,6 +989,25 @@ def get_forklift_history(
     return {"forklift_id": forklift_id, "hours": hours, "data": data}
 
 
+@app.get(
+    "/api/history/environment-sensors/{sensor_id}",
+    tags=["History"],
+    summary="Environment sensor telemetry history",
+)
+def get_environment_sensor_history(
+    sensor_id: str,
+    hours: int = Query(24, ge=1, le=720),
+    limit: int = Query(500, ge=1, le=5000),
+):
+    sensor_id = sensor_id.lower()
+    if sensor_id not in CONFIGURED_ENVIRONMENT_SENSOR_IDS:
+        raise HTTPException(status_code=404, detail="Environment sensor not found")
+    data = query_device_history(
+        "environment_telemetry", "sensor_id", sensor_id, hours, limit
+    )
+    return {"sensor_id": sensor_id, "hours": hours, "data": data}
+
+
 @app.get("/api/history/alerts", tags=["History"], summary="Persisted alert history")
 def get_alert_history(
     hours: int = Query(24, ge=1, le=720),
@@ -1014,6 +1052,12 @@ def get_history_dashboard(
                 "forklift_telemetry", "forklift_id", device_id, hours, limit
             )
             for device_id in CONFIGURED_FORKLIFT_IDS
+        },
+        "environment_sensors": {
+            sensor_id: query_device_history(
+                "environment_telemetry", "sensor_id", sensor_id, hours, limit
+            )
+            for sensor_id in CONFIGURED_ENVIRONMENT_SENSOR_IDS
         },
     }
 

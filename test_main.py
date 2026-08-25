@@ -29,12 +29,14 @@ class BackendLogicTests(unittest.TestCase):
         self.original_send_mqtt = main.send_mqtt_command
         self.original_messaging = main.messaging
         self.original_firebase_app = main.firebase_app
+        self.original_query_device_history = main.query_device_history
 
     def tearDown(self):
         main.latest_cache["devices"]["arm_1"] = self.original_device
         main.send_mqtt_command = self.original_send_mqtt
         main.messaging = self.original_messaging
         main.firebase_app = self.original_firebase_app
+        main.query_device_history = self.original_query_device_history
 
     def test_queued_command_is_dispatched_once(self):
         calls = []
@@ -73,6 +75,23 @@ class BackendLogicTests(unittest.TestCase):
         self.assertEqual(message.data["event"], "FIRE_EMERGENCY")
         self.assertEqual(message.android.priority, "high")
         self.assertEqual(message.android.notification.channel_id, "warehouse_fire_alerts")
+
+    def test_influx_write_uses_line_protocol_content_type(self):
+        headers = main.influx_headers("text/plain")
+
+        self.assertEqual(headers["Content-Type"], "text/plain")
+
+    def test_environment_sensor_history_uses_environment_table(self):
+        calls = []
+        main.query_device_history = lambda *args: calls.append(args) or []
+
+        response = main.get_environment_sensor_history("SENSOR_01", 12, 100)
+
+        self.assertEqual(response["sensor_id"], "sensor_01")
+        self.assertEqual(
+            calls,
+            [("environment_telemetry", "sensor_id", "sensor_01", 12, 100)],
+        )
 
 
 if __name__ == "__main__":

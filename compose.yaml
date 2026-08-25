@@ -9,10 +9,13 @@ services:
       - .env
     volumes:
       - ./secrets/firebase-service-account.json:/run/secrets/firebase-service-account.json:ro
+    secrets:
+      - influx-admin-token
     ports:
       - "8000:8000"
     depends_on:
       - emqx
+      - influxdb
     networks:
       - warehouse-net
 
@@ -30,9 +33,32 @@ services:
     networks:
       - warehouse-net
 
+  influxdb:
+    image: influxdb:3.11.2-core
+    container_name: warehouse-influxdb
+    restart: unless-stopped
+    command:
+      - influxdb3
+      - serve
+      - --node-id=warehouse-node
+      - --object-store=file
+      - --data-dir=/var/lib/influxdb3/data
+      - --admin-token-file=/run/secrets/influx-admin-token
+    secrets:
+      - influx-admin-token
+    volumes:
+      - influx-data:/var/lib/influxdb3/data
+    networks:
+      - warehouse-net
+
 networks:
   warehouse-net:
 
 volumes:
   emqx-data:
   emqx-log:
+  influx-data:
+
+secrets:
+  influx-admin-token:
+    file: ./secrets/influx-admin-token.json
