@@ -32,6 +32,8 @@ The demo login endpoint uses the fixed project credentials expected by the Flutt
 
 Download a Firebase Admin service-account JSON file and keep it outside the repository. Set `FIREBASE_CREDENTIALS` to its path and optionally change `FCM_TOPIC`. Fire alerts received from Unity are sent as high-priority Android notifications.
 
+For Docker Compose, save the key as `secrets/firebase-service-account.json`. It is mounted read-only at `/run/secrets/firebase-service-account.json` and the entire `secrets` directory is ignored by Git.
+
 ## Documentation
 
 - Flutter integration: `FLUTTER_API.md`

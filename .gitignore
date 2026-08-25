@@ -12,3 +12,4 @@ venv/
 main_test.py
 firebase-service-account*.json
 *service-account*.json
+secrets/
