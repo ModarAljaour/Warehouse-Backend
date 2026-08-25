@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-*/
 venv/
 .pytest_cache/
 .idea/
@@ -9,3 +10,5 @@ venv/
 *.log
 *.bak*
 main_test.py
+firebase-service-account*.json
+*service-account*.json

@@ -3,3 +3,4 @@ uvicorn[standard]
 paho-mqtt
 influxdb-client
 pydantic
+firebase-admin

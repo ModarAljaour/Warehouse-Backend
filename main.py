@@ -16,6 +16,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from influxdb_client import Point
 from pydantic import BaseModel, Field
 
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging
+except ImportError:
+    firebase_admin = None
+    credentials = None
+    messaging = None
+
 
 app = FastAPI(
     title="Digital Twin Warehouse IIoT Gateway",
@@ -40,6 +48,8 @@ INFLUX_ENABLED = os.getenv("INFLUX_ENABLED", "false").lower() == "true"
 INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8181")
 INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "sensor_data")
 INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "").strip()
+FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS", "").strip()
+FCM_TOPIC = os.getenv("FCM_TOPIC", "warehouse_alerts").strip()
 #MQTT_BROKER_HOST = "127.0.0.1"
 #MQTT_BROKER_PORT = 1883
 
@@ -52,6 +62,8 @@ TOPIC_FORKLIFT_TELEMETRY = "warehouse/forklift/telemetry"
 TOPIC_FORKLIFT_ALERTS = "warehouse/forklift/alerts"
 TOPIC_ENVIRONMENT_TELEMETRY = "warehouse/environment/telemetry"
 TOPIC_CONTROL = "warehouse/control"
+
+firebase_app = None
 
 CONFIGURED_MACHINE_IDS = ["arm_1"]
 CONFIGURED_ROBOT_IDS = ["agv_01", "agv_02"]
@@ -75,6 +87,7 @@ def device_record(device_id: str, device_type: str) -> dict:
         "desired_enabled": True,
         "reported_enabled": None,
         "pending": False,
+        "command_queued": False,
         "last_command": "RESUME",
         "last_command_at": None,
     }
@@ -346,6 +359,70 @@ def send_mqtt_command(command_str: str, device_id: Optional[str] = None, robot_i
         raise HTTPException(status_code=503, detail="MQTT broker is not available")
 
 
+def initialize_firebase():
+    global firebase_app
+    if firebase_admin is None:
+        print("Firebase notifications disabled: firebase-admin is not installed")
+        return
+    if not FIREBASE_CREDENTIALS or not os.path.isfile(FIREBASE_CREDENTIALS):
+        print("Firebase notifications disabled: service account file is missing")
+        return
+
+    try:
+        try:
+            firebase_app = firebase_admin.get_app()
+        except ValueError:
+            firebase_app = firebase_admin.initialize_app(
+                credentials.Certificate(FIREBASE_CREDENTIALS)
+            )
+        print(f"Firebase notifications enabled for topic: {FCM_TOPIC}")
+    except Exception as exc:
+        firebase_app = None
+        print(f"Firebase notifications disabled: {exc}")
+
+
+def send_fire_notification(payload: dict):
+    if firebase_app is None or messaging is None:
+        return
+
+    machine_id = str(payload.get("machine_id", "arm_1")).upper()
+    temperature = payload.get("final_temperature", payload.get("temperature"))
+    try:
+        temperature_text = f" عند حرارة {float(temperature):.1f}°C"
+    except (TypeError, ValueError):
+        temperature_text = ""
+    title = "إنذار حريق في المستودع"
+    body = f"تم اكتشاف حريق عند {machine_id}{temperature_text}. تم إيقاف أنظمة المستودع."
+
+    try:
+        message = messaging.Message(
+            notification=messaging.Notification(title=title, body=body),
+            data={
+                "event": "FIRE_EMERGENCY",
+                "machine_id": machine_id.lower(),
+                "title": title,
+                "body": body,
+            },
+            android=messaging.AndroidConfig(
+                priority="high",
+                notification=messaging.AndroidNotification(
+                    channel_id="warehouse_fire_alerts",
+                    icon="ic_notification",
+                    color="#FF5C6C",
+                    sound="default",
+                    priority="max",
+                    visibility="public",
+                    default_vibrate_timings=True,
+                ),
+            ),
+            topic=FCM_TOPIC,
+        )
+        response = messaging.send(message, app=firebase_app)
+        print(f"Firebase fire notification sent: {response}")
+    except Exception as exc:
+        print(f"Firebase fire notification failed: {exc}")
+
+
 def on_connect(client, userdata, flags, rc):
     global mqtt_connected
     mqtt_connected = rc == 0
@@ -432,6 +509,12 @@ def handle_machine_alert(payload: dict):
         return
     payload = {**payload, "machine_id": machine_id}
     add_alert("machine_alert", payload)
+    if payload.get("fire_detected") or str(payload.get("event", "")).upper() == "FIRE_EMERGENCY":
+        threading.Thread(
+            target=send_fire_notification,
+            args=(payload,),
+            daemon=True,
+        ).start()
     point = Point("machine_alerts").tag("machine_id", machine_id)
     for key, value in payload.items():
         if key != "machine_id":
@@ -584,7 +667,11 @@ def add_field(point: Point, key: str, value: Any):
 def dispatch_pending_device_command(device_id: str):
     with cache_lock:
         device = latest_cache["devices"].get(device_id)
-        if device is None or not device.get("pending", False):
+        if (
+            device is None
+            or not device.get("pending", False)
+            or not device.get("command_queued", False)
+        ):
             return
 
         last_command_at = parse_iso(device.get("last_command_at"))
@@ -607,6 +694,7 @@ def dispatch_pending_device_command(device_id: str):
         device = latest_cache["devices"].get(device_id)
         if device is not None:
             device["last_mqtt_payload"] = mqtt_payload
+            device["command_queued"] = False
 
 
 def start_mqtt_thread():
@@ -626,6 +714,7 @@ def start_mqtt_thread():
 async def startup_event():
     global main_loop
     main_loop = asyncio.get_running_loop()
+    initialize_firebase()
 
     threading.Thread(
         target=start_mqtt_thread,
@@ -685,6 +774,10 @@ def health_check():
             "queued_writes": influx_queue.qsize(),
         },
         "websocket_clients": len(connected_websockets),
+        "firebase": {
+            "enabled": firebase_app is not None,
+            "topic": FCM_TOPIC,
+        },
     }
 
 
@@ -956,6 +1049,7 @@ def toggle_device(device_id: str, body: Optional[DeviceToggleRequest] = Body(def
         current.update({
             "desired_enabled": next_enabled,
             "pending": current["reported_enabled"] != next_enabled,
+            "command_queued": not is_online,
             "last_command": command,
             "last_command_at": utc_now_iso(),
             "last_mqtt_payload": mqtt_payload,
